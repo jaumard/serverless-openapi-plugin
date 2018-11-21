@@ -1,0 +1,28 @@
+const Joi = require('joi')
+const validation = require('<%= validationSchemaFile %>')
+
+module.exports.<%= name %> = async (event, context) => {
+    const result = Joi.validate({
+        headers: event.headers || {},
+        params: event.params || {},
+        query: event.query || {},
+        body: event.body || {}
+    }, validation);
+
+    if (result.error) {
+        return {
+            statusCode: 400,
+            body: {
+                type: result.error.name,
+                details: result.error.details,
+            },
+        };
+    }
+
+    return {
+        statusCode: 200,
+        body: {
+            message: 'TODO',
+        },
+    };
+}

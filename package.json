@@ -4,8 +4,6 @@
   "main": "index.js",
   "dependencies": {
     "ejs": "^2.6.1",
-    "joi": "^14.0.4",
-    "joi-to-json-schema": "^3.4.0",
     "swagger-parser": "^6.0.2"
   },
   "license": "MIT"

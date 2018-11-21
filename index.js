@@ -1,6 +1,4 @@
 const SwaggerParser = require('swagger-parser')
-const Joi = require("joi")
-const joiConvert = require('joi-to-json-schema')
 const fs = require("fs")
 const ejs = require("ejs")
 const mkdirSync = fs.mkdirSync
@@ -25,6 +23,10 @@ class OpenApiPlugin {
         this.options = options
         // Serverless service custom variables
         this.customVars = this.serverless.variables.service.custom
+
+        if (!this.customVars.definition) {
+            this.customVars.definition = 'definition.yml'
+        }
 
         this.commands = {
             openapi: {
@@ -77,14 +79,19 @@ class OpenApiPlugin {
         }
 
         const operations = this.definition.paths
+
+        const defaultHandler = this.definition[HANDLER_KEY]
+
         Object.keys(operations).forEach(path => {
             const methods = operations[path]
             let handler = methods[HANDLER_KEY]
 
+            const commonParameters = methods['parameters']
+
             Object.keys(methods).forEach(method => {
-                if (method !== HANDLER_KEY) {
+                if (method !== HANDLER_KEY && method !== 'parameters') {
                     const methodDefinition = methods[method]
-                    let methodController = handler
+                    let methodController = handler || defaultHandler
                     if (methodDefinition[HANDLER_KEY]) {
                         methodController = methodDefinition[HANDLER_KEY]
                     }
@@ -103,6 +110,13 @@ class OpenApiPlugin {
                         finalHandler = methodControllerPath.join('/') + '/' + methodDefinition.operationId
                     }
 
+                    if (methodDefinition.parameters) {
+                        methodDefinition.parameters = methodDefinition.parameters.concat(commonParameters)
+                    }
+                    else {
+                        methodDefinition.parameters = commonParameters
+                    }
+
                     const validationSchema = this._mapValidations(this.definition, methodDefinition)
 
                     let subPath = finalHandler.split('/')
@@ -116,12 +130,7 @@ class OpenApiPlugin {
                     }
                     const schemaFile = finalHandler
 
-                    fs.writeFileSync(validationFolder + schemaFile + '.json', JSON.stringify(joiConvert(validationSchema), null /*(key, value) => {
-                        if (key === '_currentJoi') {
-                            return;
-                        }
-                        return value;
-                    }*/, 2), 'utf8')
+                    fs.writeFileSync(validationFolder + schemaFile + '.js', validationSchema, 'utf8')
 
                     this.writeHandler(methodDefinition.operationId, method.toLowerCase(), path, srcFolder + subPath + controller.split('_')[0], schemaFile);
                     this.updateServerlessDefinition(srcFolder + subPath + controller.split('_')[0]);
@@ -138,7 +147,7 @@ class OpenApiPlugin {
 
     _getJoiValidation(description) {
         if (!description) {
-            return null
+            return ''
         }
         let type = description.type
         switch (description.format) {
@@ -161,164 +170,185 @@ class OpenApiPlugin {
         let joi
         switch (type) {
             case 'object': {
-                const props = {}
+                joi = 'Joi.object({'
                 Object.keys(description.properties).forEach(key => {
                     const prop = description.properties[key]
-                    if (description.required && description.required.length > 0) {
+                    if (description.required && Array.isArray(description)) {
                         prop.required = description.required.find(item => key === item)
+                    } else if (description.required && description.required === key) {
+                        prop.required = true;
                     }
-                    props[key] = this._getJoiValidation(prop)
+                    joi += `${key}: ${this._getJoiValidation(prop)},`
                 })
-                joi = Joi.object(props)
+                joi += '})'
                 break
             }
             case 'array': {
-                joi = Joi.array().items(this._getJoiValidation(description.items))
+                joi = `Joi.array().items(${this._getJoiValidation(description.items)})`
                 break
             }
             case 'byte': {
-                joi = Joi.base64()
+                joi = 'Joi.base64()'
                 break
             }
             case 'date':
             case 'dateTime': {
-                joi = Joi.date()
+                joi = 'Joi.date()'
                 break
             }
             case 'integer':
-                joi = Joi.number().integer()
+                joi = 'Joi.number().integer()'
                 break
             case 'long':
-                joi = Joi.number()
+                joi = 'Joi.number()'
                 break
             case 'float':
-                joi = Joi.number()
+                joi = 'Joi.number()'
                 break
             case 'double':
-                joi = Joi.number()
+                joi = 'Joi.number()'
                 break
             case 'boolean':
-                joi = Joi.boolean()
+                joi = 'Joi.boolean()'
                 break
             default: {
-                joi = Joi.string()
+                joi = 'Joi.string()'
             }
         }
         if (description.pattern) {
-            joi = joi.regex(description.pattern)
+            joi += `.regex(${description.pattern})`
         }
         if (description.length) {
-            joi = joi.length(description.length)
+            joi += `.length(${description.length})`
         }
         if (description.maxItems || description.maxLength) {
-            joi = joi.max(description.maxItems || description.maxLength)
+            joi += `.max(${description.maxItems || description.maxLength})`
         }
         if (description.minItems || description.minLength) {
-            joi = joi.min(description.minItems || description.minLength)
+            joi += `.min(${description.minItems || description.minLength})`
         }
         if (description.enum) {
-            joi = joi.valid(...description.enum)
+            joi += `.valid(`
+            description.enum.forEach(item => joi += `'${item}',`);
+            joi += `)`
         }
         if (description.maximum) {
-            joi = joi.max(description.maximum)
+            joi += `.max(${description.maximum})`
         }
         if (description.minimum) {
-            joi = joi.min(description.minimum)
+            joi += `.min(${description.minimum})`
         }
         if (description.required) {
-            joi = joi.required()
+            joi += `.required()`
         }
         return joi
     }
 
     _mapValidations(definition, methodDefinition) {
-        const validation = {}
-        const headersValidation = {}
-        const queryValidation = {}
-        const paramsValidation = {}
-        let bodyValidation = {}
+        let headersValidation = ''
+        let queryValidation = ''
+        let paramsValidation = ''
+        let bodyValidation = ''
+
         if (methodDefinition['consumes'] && methodDefinition['consumes'].length > 0) {
-            headersValidation['content-type'] = Joi.string().valid(...methodDefinition['consumes']).required()
+            if (headersValidation === '') {
+                headersValidation = 'Joi.object({';
+            }
+            headersValidation += `'content-type': Joi.string().valid(`;
+            methodDefinition['consumes'].forEach(item => headersValidation += `'${item}',`);
+            headersValidation += `).required()`;
         }
+
         if (methodDefinition['produces'] && methodDefinition['produces'].length > 0) {
-            headersValidation['accept'] = Joi.string().valid(...methodDefinition['produces']).required()
+            if (headersValidation === '') {
+                headersValidation = 'Joi.object({';
+            }
+            headersValidation += `accept: Joi.string().valid(`;
+            methodDefinition['produces'].forEach(item => headersValidation += `'${item}',`);
+            headersValidation += `).required()`;
         }
 
         if (methodDefinition['parameters'] && methodDefinition['parameters'].length > 0) {
             methodDefinition['parameters'].forEach(param => {
                 switch (param.in) {
                     case 'query':
-                        queryValidation[param.name] = this._getJoiValidation(param)
+                        if (queryValidation === '') {
+                            queryValidation = 'Joi.object({';
+                        }
+                        queryValidation += `${param.name}: ${this._getJoiValidation(param)},`;
                         break
                     case 'path':
-                        paramsValidation[param.name] = this._getJoiValidation(param)
+                        if (paramsValidation === '') {
+                            paramsValidation = 'Joi.object({';
+                        }
+                        paramsValidation += `${param.name}: ${this._getJoiValidation(param)},`;
                         break
                     case 'body': {
                         const description = param.schema
                         if (description.type === 'array') {
-                            bodyValidation = this._getJoiValidation(description)
+                            bodyValidation = `Joi.array(${this._getJoiValidation(description)}),`
                         }
                         else if (description.type === 'object') {
+                            bodyValidation = 'Joi.object({'
                             Object.keys(description.properties).forEach(key => {
                                 const prop = description.properties[key]
                                 if (description.required && description.required.length > 0) {
                                     prop.required = description.required.find(item => key === item)
                                 }
-                                bodyValidation[key] = this._getJoiValidation(prop)
+
+                                bodyValidation += `${key}: ${this._getJoiValidation(prop)},`
                             })
-                            bodyValidation = Joi.object(bodyValidation)
                         }
                         break
                     }
                     case 'formData':
-                        bodyValidation[param.name] = this._getJoiValidation(param)
+                        if (bodyValidation === '') {
+                            bodyValidation = 'Joi.object({';
+                        }
+                        bodyValidation += `${param.name}: ${this._getJoiValidation(param)},`;
                         break
                     case 'header':
-                        headersValidation[param.name.toLowerCase()] = this._getJoiValidation(param)
+                        if (headersValidation === '') {
+                            headersValidation = 'Joi.object({';
+                        }
+                        headersValidation += `${param.name.toLowerCase()}: ${this._getJoiValidation(param)},`;
                         break
                 }
             })
-            if (Object.keys(headersValidation).length > 0) {
-                validation.headers = Joi.object(headersValidation).unknown(true)
-            }
-            else {
-                validation.headers = Joi.object({}).unknown(true)
-            }
-            if (Object.keys(paramsValidation).length > 0) {
-                validation.params = Joi.object(paramsValidation)
-            }
-            else {
-                validation.params = Joi.object({})
-            }
-            if (Object.keys(queryValidation).length > 0) {
-                validation.query = Joi.object(queryValidation)
-            }
-            else {
-                validation.query = Joi.object({})
-            }
-            if (Object.keys(bodyValidation).length > 0) {
-                validation.body = bodyValidation
-            }
-            else {
-                validation.body = Joi.object({})
-            }
         }
 
-        const types = ['headers', 'params', 'query', 'body']
-        types.forEach((type) => {
-            let rule = validation[type]
+        if (headersValidation === '') {
+            headersValidation = 'Joi.object({}).unknown(true).required()'
+        } else {
+            headersValidation += '}).required()'
+        }
 
-            // null, undefined, true - anything allowed
-            // false - nothing allowed
-            // {...} - ... allowed
-            rule = (rule === false ? Joi.object({}).allow(null) :
-                typeof rule === 'function' ? rule :
-                    !rule || rule === true ? Joi.any() :
-                        Joi.compile(rule))
-            validation[type] = rule
-        })
+        if (paramsValidation === '') {
+            paramsValidation = 'Joi.object({}).required()'
+        } else {
+            paramsValidation += '}).required()'
+        }
 
-        return Joi.object(validation)
+        if (queryValidation === '') {
+            queryValidation = 'Joi.object({}).required()'
+        } else {
+            queryValidation += '}).required()'
+        }
+
+        if (bodyValidation === '') {
+            bodyValidation = 'Joi.object({}).required()'
+        } else {
+            bodyValidation += '}).required()'
+        }
+
+        return `
+const Joi = require('joi')
+module.exports = Joi.object({
+    params: ${paramsValidation},
+    headers: ${headersValidation},
+    body: ${bodyValidation},
+    query: ${queryValidation},
+})`
     }
 
     writeHandler(operationId, method, httpPath, fileName, schemaFile) {
@@ -336,14 +366,13 @@ class OpenApiPlugin {
             const existingContent = fs.readFileSync(definitionFile, "utf8")
             const search = `
 ${operationId}:
-    handler: ${schemaFile.replace('/', '.')}.${operationId}
-`
+    handler: ${handlerFolder}${schemaFile}.${operationId}`
             if (existingContent.indexOf(search) === -1) {
-                ejs.renderFile(templateFolder + 'function.tpl', {
+                ejs.renderFile(templateFolder + 'function.ejs', {
                         method: method,
                         name: operationId,
                         path: httpPath,
-                        handler: handlerFolder+schemaFile
+                        handler: handlerFolder + schemaFile
                     },
                     {}, (err, content) => {
                         if (err) {
@@ -358,11 +387,11 @@ ${operationId}:
             }
 
         } else {
-            ejs.renderFile(templateFolder + 'function.tpl', {
+            ejs.renderFile(templateFolder + 'function.ejs', {
                     method: method,
                     name: operationId,
                     path: httpPath,
-                    handler: handlerFolder+schemaFile
+                    handler: handlerFolder + schemaFile
                 },
                 {}, (err, content) => {
                     if (err) {
@@ -377,7 +406,7 @@ ${operationId}:
         if (fs.existsSync(handlerFile) && false) {
             this.serverless.cli.log(`${handlerFile} already exist, skipping...`)
         } else {
-            ejs.renderFile(templateFolder + 'method.tpl', {
+            ejs.renderFile(templateFolder + 'method.ejs', {
                 method: method,
                 name: operationId,
                 validationSchemaFile: '../'.repeat(relativeToRoot) + validationFolder.replace(srcFolder, '') + schemaFile
