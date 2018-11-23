@@ -1,10 +1,10 @@
-#serverless-openapi-plugin
+# serverless-openapi-plugin
 
 Serverless plugin to generate AWS serverless architecture from openApi definition.
 
 It also generate validation (using Joi) for headers/query/params and body.
 
-#Configuration
+## Configuration
 On your `serverless.yml` add:
 
 ```
@@ -20,7 +20,7 @@ customs:
 
 In order to generate handlers, you need to specify the handler name at root or operation level with `x-serverless-handler` key.
 
-#Usage
+## Usage
 Simple as:
 ```
 serverless openapi
